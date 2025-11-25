@@ -123,3 +123,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 PR_DESCRIPTION.md
+nofx.backup.*
+backups/
