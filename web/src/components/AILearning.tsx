@@ -394,7 +394,7 @@ export default function AILearning({ traderId }: AILearningProps) {
                   textShadow: '0 4px 12px rgba(0, 0, 0, 0.3)',
                 }}
               >
-                {performance.sharpe_ratio
+                {performance.sharpe_ratio !== undefined && performance.sharpe_ratio !== null
                   ? performance.sharpe_ratio.toFixed(2)
                   : 'N/A'}
               </div>

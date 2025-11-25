@@ -178,6 +178,22 @@ func (tm *TraderManager) LoadTradersFromDatabase(database *config.Database) erro
 	}
 
 	log.Printf("✓ 成功加载 %d 个交易员到内存", len(tm.traders))
+
+	// ✅ 自动启动之前运行中的交易员（重启后恢复状态）
+	autoStartCount := 0
+	for _, traderCfg := range allTraders {
+		if traderCfg.IsRunning {
+			if at, exists := tm.traders[traderCfg.ID]; exists {
+				log.Printf("🔄 自动启动交易员: %s (恢复运行状态)", traderCfg.Name)
+				go at.Run()
+				autoStartCount++
+			}
+		}
+	}
+	if autoStartCount > 0 {
+		log.Printf("✅ 已自动启动 %d 个交易员（恢复运行状态）", autoStartCount)
+	}
+
 	return nil
 }
 

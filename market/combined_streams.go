@@ -12,26 +12,29 @@ import (
 )
 
 type CombinedStreamsClient struct {
-	conn        *websocket.Conn
-	mu          sync.RWMutex
-	subscribers map[string]chan []byte
-	reconnect   bool
-	done        chan struct{}
-	batchSize   int // 每批订阅的流数量
+	conn              *websocket.Conn
+	mu                sync.RWMutex
+	subscribers       map[string]chan []byte
+	reconnect         bool
+	done              chan struct{}
+	batchSize         int      // 每批订阅的流数量
+	subscribedStreams []string // 记录已订阅的流，用于重连后恢复
 }
 
 func NewCombinedStreamsClient(batchSize int) *CombinedStreamsClient {
 	return &CombinedStreamsClient{
-		subscribers: make(map[string]chan []byte),
-		reconnect:   true,
-		done:        make(chan struct{}),
-		batchSize:   batchSize,
+		subscribers:       make(map[string]chan []byte),
+		reconnect:         true,
+		done:              make(chan struct{}),
+		batchSize:         batchSize,
+		subscribedStreams: make([]string, 0),
 	}
 }
 
 func (c *CombinedStreamsClient) Connect() error {
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: 45 * time.Second, // 增加超时时间以适应代理
+		Proxy:            getProxyFunc(),    // ✅ 添加代理支持
 	}
 
 	// 组合流使用不同的端点
@@ -99,15 +102,19 @@ func (c *CombinedStreamsClient) subscribeStreams(streams []string) error {
 		"id":     time.Now().UnixNano(),
 	}
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
+	c.mu.Lock()
 	if c.conn == nil {
+		c.mu.Unlock()
 		return fmt.Errorf("WebSocket未连接")
 	}
 
+	// 记录已订阅的流（用于重连后恢复）
+	c.subscribedStreams = append(c.subscribedStreams, streams...)
+	conn := c.conn
+	c.mu.Unlock()
+
 	log.Printf("订阅流: %v", streams)
-	return c.conn.WriteJSON(subscribeMsg)
+	return conn.WriteJSON(subscribeMsg)
 }
 
 func (c *CombinedStreamsClient) readMessages() {
@@ -125,9 +132,17 @@ func (c *CombinedStreamsClient) readMessages() {
 				continue
 			}
 
+			// ✅ 设置读取超时（60秒），防止静默失败
+			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+
 			_, message, err := conn.ReadMessage()
 			if err != nil {
-				log.Printf("读取组合流消息失败: %v", err)
+				// 检查是否是超时错误
+				if netErr, ok := err.(interface{ Timeout() bool }); ok && netErr.Timeout() {
+					log.Printf("⚠️  WebSocket 读取超时（60秒无数据），触发重连...")
+				} else {
+					log.Printf("读取组合流消息失败: %v", err)
+				}
 				c.handleReconnect()
 				return
 			}
@@ -180,7 +195,59 @@ func (c *CombinedStreamsClient) handleReconnect() {
 	if err := c.Connect(); err != nil {
 		log.Printf("组合流重新连接失败: %v", err)
 		go c.handleReconnect()
+		return
 	}
+
+	// ✅ 重连成功后，重新订阅所有流
+	c.mu.Lock()
+	// 去重订阅流列表
+	streamSet := make(map[string]bool)
+	for _, stream := range c.subscribedStreams {
+		streamSet[stream] = true
+	}
+	uniqueStreams := make([]string, 0, len(streamSet))
+	for stream := range streamSet {
+		uniqueStreams = append(uniqueStreams, stream)
+	}
+	c.mu.Unlock()
+
+	if len(uniqueStreams) > 0 {
+		log.Printf("🔄 重新订阅 %d 个数据流...", len(uniqueStreams))
+		// 分批重新订阅
+		for i := 0; i < len(uniqueStreams); i += c.batchSize {
+			end := i + c.batchSize
+			if end > len(uniqueStreams) {
+				end = len(uniqueStreams)
+			}
+			batch := uniqueStreams[i:end]
+
+			subscribeMsg := map[string]interface{}{
+				"method": "SUBSCRIBE",
+				"params": batch,
+				"id":     time.Now().UnixNano(),
+			}
+
+			c.mu.RLock()
+			conn := c.conn
+			c.mu.RUnlock()
+
+			if conn != nil {
+				if err := conn.WriteJSON(subscribeMsg); err != nil {
+					log.Printf("⚠️  重新订阅失败: %v", err)
+				} else {
+					log.Printf("✅ 已重新订阅批次 %d/%d", (i/c.batchSize)+1, (len(uniqueStreams)+c.batchSize-1)/c.batchSize)
+				}
+			}
+
+			if i+c.batchSize < len(uniqueStreams) {
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+		log.Printf("✅ 所有数据流重新订阅完成")
+	}
+
+	// 重新启动读取循环
+	go c.readMessages()
 }
 
 func (c *CombinedStreamsClient) Close() {

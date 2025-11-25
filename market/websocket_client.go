@@ -78,7 +78,8 @@ func NewWSClient() *WSClient {
 
 func (w *WSClient) Connect() error {
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: 45 * time.Second, // 增加超时时间以适应代理
+		Proxy:            getProxyFunc(),    // ✅ 添加代理支持
 	}
 
 	conn, _, err := dialer.Dial("wss://ws-fapi.binance.com/ws-fapi/v1", nil)

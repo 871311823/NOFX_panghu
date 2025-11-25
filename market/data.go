@@ -36,6 +36,31 @@ func Get(symbol string) (*Data, error) {
 		return nil, fmt.Errorf("获取3分钟K线失败: %v", err)
 	}
 
+	// ✅ 数据新鲜度检测：防止 WebSocket 数据流卡住
+	if len(klines3m) > 0 {
+		lastKlineTime := time.UnixMilli(klines3m[len(klines3m)-1].CloseTime)
+		dataAge := time.Since(lastKlineTime)
+		
+		// 3分钟K线超过5分钟未更新 = 数据流卡住
+		if dataAge > 5*time.Minute {
+			log.Printf("⚠️  %s 数据过期 (最后更新: %.1f分钟前)，强制从API刷新...", 
+				symbol, dataAge.Minutes())
+			
+			// 强制从API获取最新数据
+			apiClient := NewAPIClient()
+			freshKlines, apiErr := apiClient.GetKlines(symbol, "3m", 100)
+			if apiErr == nil && len(freshKlines) > 0 {
+				// 更新缓存
+				WSMonitorCli.klineDataMap3m.Store(symbol, freshKlines)
+				klines3m = freshKlines
+				log.Printf("✓ %s 3分钟K线数据已刷新 (最新时间: %s)", 
+					symbol, time.UnixMilli(freshKlines[len(freshKlines)-1].CloseTime).Format("15:04:05"))
+			} else {
+				log.Printf("❌ %s API刷新失败: %v，使用缓存数据", symbol, apiErr)
+			}
+		}
+	}
+
 	// Data staleness detection: Prevent DOGEUSDT-style price freeze issues
 	if isStaleData(klines3m, symbol) {
 		log.Printf("⚠️  WARNING: %s detected stale data (consecutive price freeze), skipping symbol", symbol)
@@ -46,6 +71,28 @@ func Get(symbol string) (*Data, error) {
 	klines4h, err = WSMonitorCli.GetCurrentKlines(symbol, "4h") // 多获取用于计算指标
 	if err != nil {
 		return nil, fmt.Errorf("获取4小时K线失败: %v", err)
+	}
+
+	// ✅ 4小时K线新鲜度检测
+	if len(klines4h) > 0 {
+		lastKlineTime := time.UnixMilli(klines4h[len(klines4h)-1].CloseTime)
+		dataAge := time.Since(lastKlineTime)
+		
+		// 4小时K线超过5小时未更新 = 数据流卡住
+		if dataAge > 5*time.Hour {
+			log.Printf("⚠️  %s 4小时K线数据过期 (最后更新: %.1f小时前)，强制从API刷新...", 
+				symbol, dataAge.Hours())
+			
+			apiClient := NewAPIClient()
+			freshKlines, apiErr := apiClient.GetKlines(symbol, "4h", 100)
+			if apiErr == nil && len(freshKlines) > 0 {
+				WSMonitorCli.klineDataMap4h.Store(symbol, freshKlines)
+				klines4h = freshKlines
+				log.Printf("✓ %s 4小时K线数据已刷新", symbol)
+			} else {
+				log.Printf("❌ %s 4小时K线API刷新失败: %v，使用缓存数据", symbol, apiErr)
+			}
+		}
 	}
 
 	// 检查数据是否为空

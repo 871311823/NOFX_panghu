@@ -13,6 +13,7 @@ import (
 	"nofx/crypto"
 	"nofx/decision"
 	"nofx/hook"
+	"nofx/logger"
 	"nofx/manager"
 	"nofx/trader"
 	"strconv"
@@ -141,6 +142,7 @@ func (s *Server) setupRoutes() {
 			// 交易所配置
 			protected.GET("/exchanges", s.handleGetExchangeConfigs)
 			protected.PUT("/exchanges", s.handleUpdateExchangeConfigs)
+			protected.POST("/exchanges/:exchange_id/update-keys", s.handleUpdateExchangeKeysOnly)
 
 			// 用户信号源配置
 			protected.GET("/user/signal-sources", s.handleGetUserSignalSource)
@@ -844,6 +846,15 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 	// 获取模板名称
 	templateName := traderRecord.SystemPromptTemplate
 
+	// 🔥 启动前强制重新加载配置（热更新API Key）
+	log.Printf("🔄 重新加载交易员配置以应用最新API Key...")
+	err = s.traderManager.LoadUserTraders(s.database, userID)
+	if err != nil {
+		log.Printf("❌ 重新加载配置失败: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "加载最新配置失败: " + err.Error()})
+		return
+	}
+
 	trader, err := s.traderManager.GetTrader(traderID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "交易员不存在"})
@@ -874,7 +885,7 @@ func (s *Server) handleStartTrader(c *gin.Context) {
 		log.Printf("⚠️  更新交易员状态失败: %v", err)
 	}
 
-	log.Printf("✓ 交易员 %s 已启动", trader.GetName())
+	log.Printf("✓ 交易员 %s 已启动（使用最新API配置）", trader.GetName())
 	c.JSON(http.StatusOK, gin.H{"message": "交易员已启动"})
 }
 
@@ -988,41 +999,35 @@ func (s *Server) handleUpdateModelConfigs(c *gin.Context) {
 		return
 	}
 
-	// 解析加密的 payload
-	var encryptedPayload crypto.EncryptedPayload
-	if err := json.Unmarshal(bodyBytes, &encryptedPayload); err != nil {
-		log.Printf("❌ 解析加密载荷失败: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误，必须使用加密传输"})
-		return
-	}
-
-	// 验证是否为加密数据
-	if encryptedPayload.WrappedKey == "" {
-		log.Printf("❌ 检测到非加密请求 (UserID: %s)", userID)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "此接口仅支持加密传输，请使用加密客户端",
-			"code":    "ENCRYPTION_REQUIRED",
-			"message": "Encrypted transmission is required for security reasons",
-		})
-		return
-	}
-
-	// 解密数据
-	decrypted, err := s.cryptoHandler.cryptoService.DecryptSensitiveData(&encryptedPayload)
-	if err != nil {
-		log.Printf("❌ 解密模型配置失败 (UserID: %s): %v", userID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "解密数据失败"})
-		return
-	}
-
-	// 解析解密后的数据
 	var req UpdateModelConfigRequest
-	if err := json.Unmarshal([]byte(decrypted), &req); err != nil {
-		log.Printf("❌ 解析解密数据失败: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "解析解密数据失败"})
-		return
+
+	// 尝试解析为加密payload
+	var encryptedPayload crypto.EncryptedPayload
+	if err := json.Unmarshal(bodyBytes, &encryptedPayload); err == nil && encryptedPayload.WrappedKey != "" {
+		// 这是加密数据，进行解密
+		decrypted, err := s.cryptoHandler.cryptoService.DecryptSensitiveData(&encryptedPayload)
+		if err != nil {
+			log.Printf("❌ 解密模型配置失败 (UserID: %s): %v", userID, err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "解密数据失败"})
+			return
+		}
+
+		// 解析解密后的数据
+		if err := json.Unmarshal([]byte(decrypted), &req); err != nil {
+			log.Printf("❌ 解析解密数据失败: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "解析解密数据失败"})
+			return
+		}
+		log.Printf("🔓 已解密模型配置数据 (UserID: %s)", userID)
+	} else {
+		// 尝试作为非加密数据解析（HTTP环境降级方案）
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			log.Printf("❌ 解析模型配置失败: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
+			return
+		}
+		log.Printf("⚠️  使用非加密传输更新模型配置 (UserID: %s) - 建议使用HTTPS", userID)
 	}
-	log.Printf("🔓 已解密模型配置数据 (UserID: %s)", userID)
 
 	// 更新每个模型的配置
 	for modelID, modelData := range req.Models {
@@ -1074,7 +1079,7 @@ func (s *Server) handleGetExchangeConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, safeExchanges)
 }
 
-// handleUpdateExchangeConfigs 更新交易所配置（仅支持加密数据）
+// handleUpdateExchangeConfigs 更新交易所配置（支持加密和非加密数据）
 func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 	userID := c.GetString("user_id")
 
@@ -1085,41 +1090,35 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 		return
 	}
 
-	// 解析加密的 payload
-	var encryptedPayload crypto.EncryptedPayload
-	if err := json.Unmarshal(bodyBytes, &encryptedPayload); err != nil {
-		log.Printf("❌ 解析加密载荷失败: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误，必须使用加密传输"})
-		return
-	}
-
-	// 验证是否为加密数据
-	if encryptedPayload.WrappedKey == "" {
-		log.Printf("❌ 检测到非加密请求 (UserID: %s)", userID)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "此接口仅支持加密传输，请使用加密客户端",
-			"code":    "ENCRYPTION_REQUIRED",
-			"message": "Encrypted transmission is required for security reasons",
-		})
-		return
-	}
-
-	// 解密数据
-	decrypted, err := s.cryptoHandler.cryptoService.DecryptSensitiveData(&encryptedPayload)
-	if err != nil {
-		log.Printf("❌ 解密交易所配置失败 (UserID: %s): %v", userID, err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "解密数据失败"})
-		return
-	}
-
-	// 解析解密后的数据
 	var req UpdateExchangeConfigRequest
-	if err := json.Unmarshal([]byte(decrypted), &req); err != nil {
-		log.Printf("❌ 解析解密数据失败: %v", err)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "解析解密数据失败"})
-		return
+
+	// 尝试解析为加密payload
+	var encryptedPayload crypto.EncryptedPayload
+	if err := json.Unmarshal(bodyBytes, &encryptedPayload); err == nil && encryptedPayload.WrappedKey != "" {
+		// 这是加密数据，进行解密
+		decrypted, err := s.cryptoHandler.cryptoService.DecryptSensitiveData(&encryptedPayload)
+		if err != nil {
+			log.Printf("❌ 解密交易所配置失败 (UserID: %s): %v", userID, err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "解密数据失败"})
+			return
+		}
+
+		// 解析解密后的数据
+		if err := json.Unmarshal([]byte(decrypted), &req); err != nil {
+			log.Printf("❌ 解析解密数据失败: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "解析解密数据失败"})
+			return
+		}
+		log.Printf("🔓 已解密交易所配置数据 (UserID: %s)", userID)
+	} else {
+		// 尝试作为非加密数据解析（HTTP环境降级方案）
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			log.Printf("❌ 解析交易所配置失败: %v", err)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请求格式错误"})
+			return
+		}
+		log.Printf("⚠️  使用非加密传输更新交易所配置 (UserID: %s) - 建议使用HTTPS", userID)
 	}
-	log.Printf("🔓 已解密交易所配置数据 (UserID: %s)", userID)
 
 	// 更新每个交易所的配置
 	for exchangeID, exchangeData := range req.Exchanges {
@@ -1139,6 +1138,95 @@ func (s *Server) handleUpdateExchangeConfigs(c *gin.Context) {
 
 	log.Printf("✓ 交易所配置已更新: %+v", SanitizeExchangeConfigForLog(req.Exchanges))
 	c.JSON(http.StatusOK, gin.H{"message": "交易所配置已更新"})
+}
+
+// handleUpdateExchangeKeysOnly 仅更新数据库中的API密钥（不影响运行中的交易员）
+func (s *Server) handleUpdateExchangeKeysOnly(c *gin.Context) {
+	userID := c.GetString("user_id")
+	exchangeID := c.Param("exchange_id")
+
+	var req struct {
+		APIKey    string `json:"api_key" binding:"required"`
+		SecretKey string `json:"secret_key" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	log.Printf("🔑 [密钥更新] 用户 %s 请求更新交易所 %s 的API密钥（仅数据库）", userID, exchangeID)
+
+	// 1. 获取现有配置
+	exchanges, err := s.database.GetExchanges(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取交易所配置失败"})
+		return
+	}
+
+	var existingExchange *config.ExchangeConfig
+	for _, ex := range exchanges {
+		if ex.ID == exchangeID {
+			existingExchange = ex
+			break
+		}
+	}
+
+	if existingExchange == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "交易所配置不存在"})
+		return
+	}
+
+	// 2. 获取使用该交易所的交易员信息
+	traders, err := s.database.GetTraders(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取交易员列表失败"})
+		return
+	}
+
+	var affectedTraders []string
+	var runningTraders []string
+	for _, trader := range traders {
+		if trader.ExchangeID == exchangeID {
+			affectedTraders = append(affectedTraders, trader.ID)
+			if trader.IsRunning {
+				runningTraders = append(runningTraders, trader.ID)
+			}
+		}
+	}
+
+	log.Printf("📊 [密钥更新] 发现 %d 个使用 %s 的交易员，其中 %d 个正在运行", 
+		len(affectedTraders), exchangeID, len(runningTraders))
+
+	// 3. 仅更新数据库中的API密钥（保留其他配置）
+	err = s.database.UpdateExchange(
+		userID,
+		exchangeID,
+		existingExchange.Enabled,
+		req.APIKey,
+		req.SecretKey,
+		existingExchange.Testnet,
+		existingExchange.HyperliquidWalletAddr,
+		existingExchange.AsterUser,
+		existingExchange.AsterSigner,
+		existingExchange.AsterPrivateKey,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新API密钥失败: " + err.Error()})
+		return
+	}
+
+	log.Printf("✅ [密钥更新] API密钥已更新到数据库")
+	log.Printf("ℹ️  [密钥更新] 运行中的交易员将继续使用旧密钥，直到下次重启")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "API密钥已更新到数据库",
+		"affected_traders": len(affectedTraders),
+		"running_traders":  len(runningTraders),
+		"trader_ids":       affectedTraders,
+		"note":             "运行中的交易员将在下次重启时使用新密钥",
+	})
 }
 
 // handleGetUserSignalSource 获取用户信号源配置
@@ -1546,6 +1634,264 @@ func (s *Server) handleEquityHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, history)
 }
 
+// analyzePerformanceFromBinance 从Binance API获取真实交易数据并分析
+func (s *Server) analyzePerformanceFromBinance(traderInstance trader.Trader, lookbackDays int) (*logger.PerformanceAnalysis, error) {
+	// ✅ 修复：直接类型断言到 *FuturesTrader
+	futuresTrader, ok := traderInstance.(*trader.FuturesTrader)
+	if !ok {
+		return nil, fmt.Errorf("交易员不支持Binance API（不是 FuturesTrader 类型）")
+	}
+
+	tradeHistory, err := futuresTrader.GetAllTradeHistory(lookbackDays)
+	if err != nil {
+		return nil, fmt.Errorf("获取交易历史失败: %w", err)
+	}
+	
+	// ✅ 添加日志：查看获取到的数据
+	totalTradesCount := 0
+	for symbol, trades := range tradeHistory {
+		totalTradesCount += len(trades)
+		log.Printf("📊 %s: %d 笔交易", symbol, len(trades))
+	}
+	log.Printf("📊 总共获取到 %d 个币种，%d 笔交易记录", len(tradeHistory), totalTradesCount)
+
+	// 构建性能分析
+	analysis := &logger.PerformanceAnalysis{
+		RecentTrades: []logger.TradeOutcome{},
+		SymbolStats:  make(map[string]*logger.SymbolPerformance),
+	}
+
+	// 按币种分组分析交易
+	for symbol, trades := range tradeHistory {
+		if len(trades) == 0 {
+			continue
+		}
+
+		// 追踪每个方向的持仓
+		type Position struct {
+			openPrice      float64
+			openTime       int64
+			totalQty       float64
+			totalCost      float64
+			realizedPnl    float64
+			commission     float64
+			tradeCount     int
+		}
+
+		longPos := &Position{}
+		shortPos := &Position{}
+
+		for _, trade := range trades {
+			var pos *Position
+			if trade.PositionSide == "LONG" {
+				pos = longPos
+			} else if trade.PositionSide == "SHORT" {
+				pos = shortPos
+			} else {
+				continue
+			}
+
+			// 累积交易数据
+			if trade.Side == "BUY" && trade.PositionSide == "LONG" ||
+				trade.Side == "SELL" && trade.PositionSide == "SHORT" {
+				// 开仓
+				if pos.totalQty == 0 {
+					pos.openTime = trade.Time
+				}
+				pos.totalCost += trade.Price * trade.Qty
+				pos.totalQty += trade.Qty
+				pos.tradeCount++
+			} else {
+				// 平仓
+				pos.realizedPnl += trade.RealizedPnl
+				pos.commission += trade.Commission
+				pos.totalQty -= trade.Qty
+				pos.tradeCount++
+
+				// 如果完全平仓，记录交易结果
+				if pos.totalQty <= 0.0001 && pos.tradeCount > 0 {
+					avgOpenPrice := pos.totalCost / (pos.totalQty + trade.Qty)
+					duration := time.Duration((trade.Time - pos.openTime) * int64(time.Millisecond))
+					
+					// 计算仓位相关数据
+					quantity := pos.totalQty + trade.Qty
+					positionValue := avgOpenPrice * quantity
+					leverage := 5 // 默认杠杆，可以从配置中获取
+					marginUsed := positionValue / float64(leverage)
+
+					outcome := logger.TradeOutcome{
+						Symbol:        symbol,
+						Side:          strings.ToLower(trade.PositionSide),
+						Quantity:      quantity,
+						Leverage:      leverage,
+						OpenPrice:     avgOpenPrice,
+						ClosePrice:    trade.Price,
+						PositionValue: positionValue,
+						MarginUsed:    marginUsed,
+						PnL:           pos.realizedPnl - pos.commission,
+						PnLPct:        (pos.realizedPnl - pos.commission) / marginUsed * 100,
+						Duration:      duration.String(),
+						OpenTime:      time.UnixMilli(pos.openTime),
+						CloseTime:     time.UnixMilli(trade.Time),
+					}
+
+					analysis.RecentTrades = append(analysis.RecentTrades, outcome)
+					analysis.TotalTrades++
+
+					if outcome.PnL > 0 {
+						analysis.WinningTrades++
+						analysis.AvgWin += outcome.PnL
+					} else if outcome.PnL < 0 {
+						analysis.LosingTrades++
+						analysis.AvgLoss += outcome.PnL
+					}
+
+					// 更新币种统计
+					if _, exists := analysis.SymbolStats[symbol]; !exists {
+						analysis.SymbolStats[symbol] = &logger.SymbolPerformance{
+							Symbol: symbol,
+						}
+					}
+					stats := analysis.SymbolStats[symbol]
+					stats.TotalTrades++
+					stats.TotalPnL += outcome.PnL
+					if outcome.PnL > 0 {
+						stats.WinningTrades++
+					} else if outcome.PnL < 0 {
+						stats.LosingTrades++
+					}
+
+					// 重置持仓
+					*pos = Position{}
+				}
+			}
+		}
+	}
+
+	// 计算统计指标
+	if analysis.WinningTrades > 0 {
+		analysis.AvgWin /= float64(analysis.WinningTrades)
+	}
+	if analysis.LosingTrades > 0 {
+		analysis.AvgLoss /= float64(analysis.LosingTrades)
+	}
+	if analysis.TotalTrades > 0 {
+		analysis.WinRate = float64(analysis.WinningTrades) / float64(analysis.TotalTrades) * 100
+	}
+	
+	// ✅ 修复盈亏比计算：防止除以零和异常值
+	if analysis.AvgLoss != 0 && analysis.LosingTrades > 0 {
+		analysis.ProfitFactor = analysis.AvgWin / -analysis.AvgLoss
+		// 限制最大值，避免显示异常的 999.00
+		if analysis.ProfitFactor > 100 {
+			analysis.ProfitFactor = 100
+		}
+	} else if analysis.WinningTrades > 0 && analysis.LosingTrades == 0 {
+		// 如果只有盈利交易，没有亏损交易，设置为一个合理的上限
+		analysis.ProfitFactor = 100
+	} else {
+		analysis.ProfitFactor = 0
+	}
+	
+	// ✅ 计算夏普比率（风险调整后收益）
+	// 夏普比率 = (平均收益率 - 无风险利率) / 收益率标准差
+	if len(analysis.RecentTrades) >= 2 {
+		// 1. 计算每笔交易的收益率
+		returns := make([]float64, 0, len(analysis.RecentTrades))
+		
+		log.Printf("📊 开始计算夏普比率，交易数量: %d", len(analysis.RecentTrades))
+		
+		for i, trade := range analysis.RecentTrades {
+			var returnRate float64
+			var baseValue float64
+			
+			// 优先使用保证金，其次仓位价值，最后使用开仓价值估算
+			if trade.MarginUsed > 0 {
+				baseValue = trade.MarginUsed
+				returnRate = trade.PnL / trade.MarginUsed
+				log.Printf("  交易%d: 使用保证金 %.2f, 盈亏 %.2f, 收益率 %.4f", i+1, trade.MarginUsed, trade.PnL, returnRate)
+			} else if trade.PositionValue > 0 {
+				baseValue = trade.PositionValue
+				returnRate = trade.PnL / trade.PositionValue
+				log.Printf("  交易%d: 使用仓位价值 %.2f, 盈亏 %.2f, 收益率 %.4f", i+1, trade.PositionValue, trade.PnL, returnRate)
+			} else if trade.OpenPrice > 0 && trade.Quantity > 0 {
+				// 降级方案：使用开仓价值估算
+				baseValue = trade.OpenPrice * trade.Quantity
+				if trade.Leverage > 0 {
+					baseValue = baseValue / float64(trade.Leverage)
+				}
+				if baseValue > 0 {
+					returnRate = trade.PnL / baseValue
+					log.Printf("  交易%d: 使用估算保证金 %.2f (开仓价 %.2f × 数量 %.4f ÷ 杠杆 %d), 盈亏 %.2f, 收益率 %.4f", 
+						i+1, baseValue, trade.OpenPrice, trade.Quantity, trade.Leverage, trade.PnL, returnRate)
+				}
+			}
+			
+			if baseValue > 0 {
+				returns = append(returns, returnRate)
+			} else {
+				log.Printf("  ⚠️ 交易%d: 无法计算收益率，跳过", i+1)
+			}
+		}
+		
+		log.Printf("📊 有效收益率数量: %d", len(returns))
+		
+		if len(returns) >= 2 {
+			// 2. 计算平均收益率
+			var sumReturns float64
+			for _, r := range returns {
+				sumReturns += r
+			}
+			avgReturn := sumReturns / float64(len(returns))
+			
+			// 3. 计算标准差
+			var sumSquaredDiff float64
+			for _, r := range returns {
+				diff := r - avgReturn
+				sumSquaredDiff += diff * diff
+			}
+			stdDev := math.Sqrt(sumSquaredDiff / float64(len(returns)))
+			
+			// 4. 计算夏普比率（假设无风险利率为0）
+			if stdDev > 0 {
+				// 不年化，直接使用交易级别的夏普比率
+				analysis.SharpeRatio = avgReturn / stdDev
+				
+				// 限制范围 [-3, 3]，避免异常值
+				if analysis.SharpeRatio > 3 {
+					analysis.SharpeRatio = 3
+				} else if analysis.SharpeRatio < -3 {
+					analysis.SharpeRatio = -3
+				}
+				
+				log.Printf("📊 夏普比率计算完成: 平均收益率=%.4f, 标准差=%.4f, 夏普比率=%.2f", 
+					avgReturn, stdDev, analysis.SharpeRatio)
+			} else {
+				log.Printf("⚠️ 标准差为0，无法计算夏普比率")
+			}
+		} else {
+			log.Printf("⚠️ 有效交易数量不足(%d < 2)，无法计算夏普比率", len(returns))
+		}
+	} else {
+		log.Printf("⚠️ 交易数量不足(%d < 2)，无法计算夏普比率", len(analysis.RecentTrades))
+	}
+	
+	log.Printf("📊 统计结果: 总交易=%d, 盈利=%d, 亏损=%d, 胜率=%.2f%%, 盈亏比=%.2f, 夏普比率=%.2f",
+		analysis.TotalTrades, analysis.WinningTrades, analysis.LosingTrades, 
+		analysis.WinRate, analysis.ProfitFactor, analysis.SharpeRatio)
+
+	// 计算币种统计
+	for _, stats := range analysis.SymbolStats {
+		if stats.TotalTrades > 0 {
+			stats.WinRate = float64(stats.WinningTrades) / float64(stats.TotalTrades) * 100
+			stats.AvgPnL = stats.TotalPnL / float64(stats.TotalTrades)
+		}
+	}
+
+	log.Printf("✅ 从Binance API分析了 %d 笔交易", analysis.TotalTrades)
+	return analysis, nil
+}
+
 // handlePerformance AI历史表现分析（用于展示AI学习和反思）
 func (s *Server) handlePerformance(c *gin.Context) {
 	_, traderID, err := s.getTraderFromQuery(c)
@@ -1560,14 +1906,20 @@ func (s *Server) handlePerformance(c *gin.Context) {
 		return
 	}
 
-	// 分析最近100个周期的交易表现（避免长期持仓的交易记录丢失）
-	// 假设每3分钟一个周期，100个周期 = 5小时，足够覆盖大部分交易
-	performance, err := trader.GetDecisionLogger().AnalyzePerformance(100)
+	// 🔥 优先使用Binance API获取真实交易数据
+	// 尝试从Binance获取最近7天的交易历史
+	// ✅ 修复：直接传递 AutoTrader，在函数内部获取底层 Trader
+	performance, err := s.analyzePerformanceFromBinance(trader.GetTrader(), 7)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": fmt.Sprintf("分析历史表现失败: %v", err),
-		})
-		return
+		// 如果Binance API失败，降级到本地日志分析
+		log.Printf("⚠️ 从Binance获取交易历史失败，使用本地日志: %v", err)
+		performance, err = trader.GetDecisionLogger().AnalyzePerformance(100)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": fmt.Sprintf("分析历史表现失败: %v", err),
+			})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, performance)

@@ -915,3 +915,98 @@ func stringContains(s, substr string) bool {
 	}
 	return false
 }
+
+// BinanceTradeHistory Binance交易历史记录
+type BinanceTradeHistory struct {
+	Symbol          string
+	Side            string  // BUY/SELL
+	PositionSide    string  // LONG/SHORT
+	Price           float64
+	Qty             float64
+	RealizedPnl     float64
+	Commission      float64
+	CommissionAsset string
+	Time            int64
+	Buyer           bool
+}
+
+// GetTradeHistory 获取交易历史（最近N天）
+func (t *FuturesTrader) GetTradeHistory(symbol string, lookbackDays int) ([]*BinanceTradeHistory, error) {
+	startTime := time.Now().AddDate(0, 0, -lookbackDays).UnixMilli()
+	
+	service := t.client.NewListAccountTradeService().
+		Symbol(symbol).
+		StartTime(startTime).
+		Limit(1000) // 最多1000条
+	
+	trades, err := service.Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("获取交易历史失败: %w", err)
+	}
+	
+	var history []*BinanceTradeHistory
+	for _, trade := range trades {
+		price, _ := strconv.ParseFloat(trade.Price, 64)
+		qty, _ := strconv.ParseFloat(trade.Quantity, 64) // 修复：使用Quantity而不是Qty
+		realizedPnl, _ := strconv.ParseFloat(trade.RealizedPnl, 64)
+		commission, _ := strconv.ParseFloat(trade.Commission, 64)
+		
+		history = append(history, &BinanceTradeHistory{
+			Symbol:          trade.Symbol,
+			Side:            string(trade.Side),            // 修复：转换为string
+			PositionSide:    string(trade.PositionSide),    // 修复：转换为string
+			Price:           price,
+			Qty:             qty,
+			RealizedPnl:     realizedPnl,
+			Commission:      commission,
+			CommissionAsset: trade.CommissionAsset,
+			Time:            trade.Time,
+			Buyer:           trade.Buyer,
+		})
+	}
+	
+	return history, nil
+}
+
+// GetAllTradeHistory 获取所有币种的交易历史
+func (t *FuturesTrader) GetAllTradeHistory(lookbackDays int) (map[string][]*BinanceTradeHistory, error) {
+	// ✅ 修复：直接从币安 API 获取所有交易历史，不限制币种
+	// 这样可以获取已平仓币种的历史交易
+	startTime := time.Now().AddDate(0, 0, -lookbackDays).UnixMilli()
+	
+	// 获取所有交易记录（不指定symbol）
+	service := t.client.NewListAccountTradeService().
+		StartTime(startTime).
+		Limit(1000) // 最多1000条
+	
+	trades, err := service.Do(context.Background())
+	if err != nil {
+		return nil, fmt.Errorf("获取所有交易历史失败: %w", err)
+	}
+	
+	// 按币种分组
+	result := make(map[string][]*BinanceTradeHistory)
+	for _, trade := range trades {
+		price, _ := strconv.ParseFloat(trade.Price, 64)
+		qty, _ := strconv.ParseFloat(trade.Quantity, 64)
+		realizedPnl, _ := strconv.ParseFloat(trade.RealizedPnl, 64)
+		commission, _ := strconv.ParseFloat(trade.Commission, 64)
+		
+		history := &BinanceTradeHistory{
+			Symbol:          trade.Symbol,
+			Side:            string(trade.Side),
+			PositionSide:    string(trade.PositionSide),
+			Price:           price,
+			Qty:             qty,
+			RealizedPnl:     realizedPnl,
+			Commission:      commission,
+			CommissionAsset: trade.CommissionAsset,
+			Time:            trade.Time,
+			Buyer:           trade.Buyer,
+		}
+		
+		result[trade.Symbol] = append(result[trade.Symbol], history)
+	}
+	
+	return result, nil
+}

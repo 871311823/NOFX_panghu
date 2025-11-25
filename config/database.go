@@ -194,6 +194,43 @@ func (d *Database) createTables() error {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)`,
 
+		// 交易历史表
+		`CREATE TABLE IF NOT EXISTS trade_history (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL,
+			trader_id TEXT NOT NULL,
+			symbol TEXT NOT NULL,
+			side TEXT NOT NULL,
+			position_side TEXT NOT NULL,
+			price REAL NOT NULL,
+			quantity REAL NOT NULL,
+			realized_pnl REAL NOT NULL,
+			commission REAL NOT NULL,
+			commission_asset TEXT NOT NULL,
+			trade_time INTEGER NOT NULL,
+			buyer BOOLEAN NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(user_id, trader_id, symbol, trade_time, side, position_side)
+		)`,
+
+		// 交易历史索引
+		`CREATE INDEX IF NOT EXISTS idx_trade_history_user_trader 
+			ON trade_history(user_id, trader_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_trade_history_time 
+			ON trade_history(trade_time DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_trade_history_symbol 
+			ON trade_history(symbol)`,
+
+		// 同步状态表
+		`CREATE TABLE IF NOT EXISTS sync_status (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			user_id TEXT NOT NULL,
+			trader_id TEXT NOT NULL,
+			last_sync_time INTEGER NOT NULL,
+			last_sync_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(user_id, trader_id)
+		)`,
+
 		// 触发器：自动更新 updated_at
 		`CREATE TRIGGER IF NOT EXISTS update_users_updated_at
 			AFTER UPDATE ON users
@@ -580,6 +617,7 @@ func (d *Database) GetUserByID(userID string) (*User, error) {
 
 // GetAllUsers 获取所有用户ID列表
 func (d *Database) GetAllUsers() ([]string, error) {
+	// 先尝试从users表获取
 	rows, err := d.db.Query(`SELECT id FROM users ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -594,6 +632,24 @@ func (d *Database) GetAllUsers() ([]string, error) {
 		}
 		userIDs = append(userIDs, userID)
 	}
+	
+	// 如果users表为空，从traders表中获取不同的user_id
+	if len(userIDs) == 0 {
+		rows2, err := d.db.Query(`SELECT DISTINCT user_id FROM traders ORDER BY user_id`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows2.Close()
+		
+		for rows2.Next() {
+			var userID string
+			if err := rows2.Scan(&userID); err != nil {
+				return nil, err
+			}
+			userIDs = append(userIDs, userID)
+		}
+	}
+	
 	return userIDs, nil
 }
 

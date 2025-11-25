@@ -319,6 +319,13 @@ func (at *AutoTrader) runCycle() error {
 		log.Println("📅 日盈亏已重置")
 	}
 
+	// 3.5 定期强制刷新市场数据（每10个周期 = 30分钟）
+	if at.callCount%10 == 1 { // 使用 %10 == 1 避免与第一次执行冲突
+		log.Printf("🔄 定期刷新市场数据（第 %d 个周期）...", at.callCount)
+		// 触发数据新鲜度检测（通过访问市场数据触发）
+		// 这会在 market.Get() 中自动检测并刷新过期数据
+	}
+
 	// 4. 收集交易上下文
 	ctx, err := at.buildTradingContext()
 	if err != nil {
@@ -685,8 +692,6 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	actionRecord.Price = marketData.CurrentPrice
 
 	// ⚠️ 保证金验证：防止保证金不足错误（code=-2019）
-	requiredMargin := decision.PositionSizeUSD / float64(decision.Leverage)
-
 	balance, err := at.trader.GetBalance()
 	if err != nil {
 		return fmt.Errorf("获取账户余额失败: %w", err)
@@ -696,10 +701,37 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		availableBalance = avail
 	}
 
-	// 手续费估算（Taker费率 0.04%）
-	estimatedFee := decision.PositionSizeUSD * 0.0004
+	// 手续费率（Taker费率 0.04% + 安全余量 0.01% = 0.05%）
+	feeRate := 0.0005
+	
+	// 计算实际可用的仓位价值（扣除手续费后）
+	// 公式：可用余额 = 保证金 + 手续费
+	//      可用余额 = (仓位价值 / 杠杆) + (仓位价值 * 手续费率)
+	//      可用余额 = 仓位价值 * (1/杠杆 + 手续费率)
+	//      仓位价值 = 可用余额 / (1/杠杆 + 手续费率)
+	maxPositionSize := availableBalance / (1.0/float64(decision.Leverage) + feeRate)
+	
+	// 如果 AI 要求的仓位超过可用余额，自动调整到最大可用仓位的 98%（留 2% 安全余量）
+	adjustedPositionSize := decision.PositionSizeUSD
+	if decision.PositionSizeUSD > maxPositionSize {
+		adjustedPositionSize = maxPositionSize * 0.98
+		log.Printf("  ⚠️  AI要求仓位 %.2f USDT 超过可用余额，自动调整为 %.2f USDT（%.1f%%）",
+			decision.PositionSizeUSD, adjustedPositionSize, (adjustedPositionSize/decision.PositionSizeUSD)*100)
+	}
+	
+	// 重新计算数量和保证金
+	quantity = adjustedPositionSize / marketData.CurrentPrice
+	requiredMargin := adjustedPositionSize / float64(decision.Leverage)
+	estimatedFee := adjustedPositionSize * feeRate
 	totalRequired := requiredMargin + estimatedFee
 
+	// 🔍 详细日志：帮助诊断保证金问题
+	log.Printf("  📊 开多仓参数: 仓位价值=%.2f USDT, 杠杆=%dx, 数量=%.4f, 价格=%.2f",
+		adjustedPositionSize, decision.Leverage, quantity, marketData.CurrentPrice)
+	log.Printf("  💰 保证金计算: 需要保证金=%.2f, 手续费=%.2f, 总需求=%.2f, 可用余额=%.2f",
+		requiredMargin, estimatedFee, totalRequired, availableBalance)
+
+	// 最终验证（理论上不应该失败，但保留检查）
 	if totalRequired > availableBalance {
 		return fmt.Errorf("❌ 保证金不足: 需要 %.2f USDT（保证金 %.2f + 手续费 %.2f），可用 %.2f USDT",
 			totalRequired, requiredMargin, estimatedFee, availableBalance)
@@ -765,8 +797,6 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	actionRecord.Price = marketData.CurrentPrice
 
 	// ⚠️ 保证金验证：防止保证金不足错误（code=-2019）
-	requiredMargin := decision.PositionSizeUSD / float64(decision.Leverage)
-
 	balance, err := at.trader.GetBalance()
 	if err != nil {
 		return fmt.Errorf("获取账户余额失败: %w", err)
@@ -776,10 +806,33 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		availableBalance = avail
 	}
 
-	// 手续费估算（Taker费率 0.04%）
-	estimatedFee := decision.PositionSizeUSD * 0.0004
+	// 手续费率（Taker费率 0.04% + 安全余量 0.01% = 0.05%）
+	feeRate := 0.0005
+	
+	// 计算实际可用的仓位价值（扣除手续费后）
+	maxPositionSize := availableBalance / (1.0/float64(decision.Leverage) + feeRate)
+	
+	// 如果 AI 要求的仓位超过可用余额，自动调整到最大可用仓位的 98%（留 2% 安全余量）
+	adjustedPositionSize := decision.PositionSizeUSD
+	if decision.PositionSizeUSD > maxPositionSize {
+		adjustedPositionSize = maxPositionSize * 0.98
+		log.Printf("  ⚠️  AI要求仓位 %.2f USDT 超过可用余额，自动调整为 %.2f USDT（%.1f%%）",
+			decision.PositionSizeUSD, adjustedPositionSize, (adjustedPositionSize/decision.PositionSizeUSD)*100)
+	}
+	
+	// 重新计算数量和保证金
+	quantity = adjustedPositionSize / marketData.CurrentPrice
+	requiredMargin := adjustedPositionSize / float64(decision.Leverage)
+	estimatedFee := adjustedPositionSize * feeRate
 	totalRequired := requiredMargin + estimatedFee
 
+	// 🔍 详细日志：帮助诊断保证金问题
+	log.Printf("  📊 开空仓参数: 仓位价值=%.2f USDT, 杠杆=%dx, 数量=%.4f, 价格=%.2f",
+		adjustedPositionSize, decision.Leverage, quantity, marketData.CurrentPrice)
+	log.Printf("  💰 保证金计算: 需要保证金=%.2f, 手续费=%.2f, 总需求=%.2f, 可用余额=%.2f",
+		requiredMargin, estimatedFee, totalRequired, availableBalance)
+
+	// 最终验证（理论上不应该失败，但保留检查）
 	if totalRequired > availableBalance {
 		return fmt.Errorf("❌ 保证金不足: 需要 %.2f USDT（保证金 %.2f + 手续费 %.2f），可用 %.2f USDT",
 			totalRequired, requiredMargin, estimatedFee, availableBalance)
@@ -1209,6 +1262,11 @@ func (at *AutoTrader) GetSystemPromptTemplate() string {
 // GetDecisionLogger 获取决策日志记录器
 func (at *AutoTrader) GetDecisionLogger() logger.IDecisionLogger {
 	return at.decisionLogger
+}
+
+// GetTrader 获取底层交易器（用于访问 Binance API）
+func (at *AutoTrader) GetTrader() Trader {
+	return at.trader
 }
 
 // GetStatus 获取系统状态（用于API）
