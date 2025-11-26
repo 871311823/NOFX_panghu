@@ -88,6 +88,7 @@ export interface TraderInfo {
   trader_id: string
   trader_name: string
   ai_model: string
+  ai_custom_model?: string // 自定义模型名称（完整名称）
   exchange_id?: string
   is_running?: boolean
   custom_prompt?: string

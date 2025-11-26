@@ -17,6 +17,8 @@ import { SignalSourceWarning } from '../components/traders/sections/SignalSource
 import { AIModelsSection } from '../components/traders/sections/AIModelsSection'
 import { ExchangesSection } from '../components/traders/sections/ExchangesSection'
 import { TradersGrid } from '../components/traders/sections/TradersGrid'
+import { ModelPerformanceSection } from '../components/traders/sections/ModelPerformanceSection'
+import type { CompetitionData } from '../types'
 
 interface AITradersPageProps {
   onTraderSelect?: (traderId: string) => void
@@ -67,6 +69,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
     api.getTraders,
     { refreshInterval: 5000 }
   )
+
+  const { data: competitionData, isLoading: isCompetitionLoading } = useSWR<
+    CompetitionData
+  >(user && token ? 'competition-overview' : null, api.getCompetition, {
+    refreshInterval: 15000,
+    revalidateOnFocus: false,
+  })
 
   // Load configurations
   useEffect(() => {
@@ -180,6 +189,13 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
           onExchangeClick={handleExchangeClick}
         />
       </div>
+
+      <ModelPerformanceSection
+        language={language}
+        configuredModels={configuredModels}
+        traders={competitionData?.traders}
+        isLoading={isCompetitionLoading}
+      />
 
       {/* Traders Grid */}
       <TradersGrid

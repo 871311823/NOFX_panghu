@@ -102,6 +102,7 @@ type AutoTrader struct {
 	positionFirstSeenTime map[string]int64   // 持仓首次出现时间 (symbol_side -> timestamp毫秒)
 	stopMonitorCh         chan struct{}      // 用于停止监控goroutine
 	monitorWg             sync.WaitGroup     // 用于等待监控goroutine结束
+	mu                    sync.RWMutex       // 保护 isRunning 和 startTime 的读写锁
 	peakPnLCache          map[string]float64 // 最高收益缓存 (symbol -> 峰值盈亏百分比)
 	peakPnLCacheMutex     sync.RWMutex       // 缓存读写锁
 	lastBalanceSyncTime   time.Time          // 上次余额同步时间
@@ -240,7 +241,16 @@ func NewAutoTrader(config AutoTraderConfig, database interface{}, userID string)
 
 // Run 运行自动交易主循环
 func (at *AutoTrader) Run() error {
+	// 防止重复启动
+	at.mu.Lock()
+	if at.isRunning {
+		at.mu.Unlock()
+		log.Printf("⚠️ [%s] 交易员已在运行中，跳过重复启动", at.name)
+		return nil
+	}
 	at.isRunning = true
+	at.mu.Unlock()
+
 	at.stopMonitorCh = make(chan struct{})
 	at.startTime = time.Now()
 
@@ -262,7 +272,15 @@ func (at *AutoTrader) Run() error {
 		log.Printf("❌ 执行失败: %v", err)
 	}
 
-	for at.isRunning {
+	for {
+		at.mu.RLock()
+		running := at.isRunning
+		at.mu.RUnlock()
+
+		if !running {
+			break
+		}
+
 		select {
 		case <-ticker.C:
 			if err := at.runCycle(); err != nil {
@@ -279,10 +297,14 @@ func (at *AutoTrader) Run() error {
 
 // Stop 停止自动交易
 func (at *AutoTrader) Stop() {
+	at.mu.Lock()
 	if !at.isRunning {
+		at.mu.Unlock()
 		return
 	}
 	at.isRunning = false
+	at.mu.Unlock()
+
 	close(at.stopMonitorCh) // 通知监控goroutine停止
 	at.monitorWg.Wait()     // 等待监控goroutine结束
 	log.Println("⏹ 自动交易系统停止")
@@ -1276,14 +1298,19 @@ func (at *AutoTrader) GetStatus() map[string]interface{} {
 		aiProvider = "Qwen"
 	}
 
+	at.mu.RLock()
+	isRunning := at.isRunning
+	startTime := at.startTime
+	at.mu.RUnlock()
+
 	return map[string]interface{}{
 		"trader_id":       at.id,
 		"trader_name":     at.name,
 		"ai_model":        at.aiModel,
 		"exchange":        at.exchange,
-		"is_running":      at.isRunning,
-		"start_time":      at.startTime.Format(time.RFC3339),
-		"runtime_minutes": int(time.Since(at.startTime).Minutes()),
+		"is_running":      isRunning,
+		"start_time":      startTime.Format(time.RFC3339),
+		"runtime_minutes": int(time.Since(startTime).Minutes()),
 		"call_count":      at.callCount,
 		"initial_balance": at.initialBalance,
 		"scan_interval":   at.config.ScanInterval.String(),

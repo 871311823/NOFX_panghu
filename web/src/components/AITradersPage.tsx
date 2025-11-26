@@ -1051,7 +1051,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                   >
                     <Bot className="w-5 h-5 md:w-6 md:h-6" />
                   </div>
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div
                       className="font-bold text-base md:text-lg truncate"
                       style={{ color: '#EAECEF' }}
@@ -1059,7 +1059,7 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       {trader.trader_name}
                     </div>
                     <div
-                      className="text-xs md:text-sm truncate"
+                      className="text-xs truncate"
                       style={{
                         color: trader.ai_model.includes('deepseek')
                           ? '#60a5fa'
@@ -1069,7 +1069,15 @@ export function AITradersPage({ onTraderSelect }: AITradersPageProps) {
                       {getModelDisplayName(
                         trader.ai_model.split('_').pop() || trader.ai_model
                       )}{' '}
-                      Model • {trader.exchange_id?.toUpperCase()}
+                      • {trader.exchange_id?.toUpperCase()}
+                    </div>
+                    {/* 显示完整模型名称 */}
+                    <div
+                      className="text-xs truncate mt-0.5"
+                      style={{ color: '#848E9C' }}
+                      title={trader.ai_custom_model || trader.ai_model}
+                    >
+                      📊 {trader.ai_custom_model || trader.ai_model || 'N/A'}
                     </div>
                   </div>
                 </div>

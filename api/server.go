@@ -138,6 +138,7 @@ func (s *Server) setupRoutes() {
 			// AI模型配置
 			protected.GET("/models", s.handleGetModelConfigs)
 			protected.PUT("/models", s.handleUpdateModelConfigs)
+			protected.POST("/models/update-keys", s.handleUpdateAIModelKeysOnly)
 
 			// 交易所配置
 			protected.GET("/exchanges", s.handleGetExchangeConfigs)
@@ -1222,6 +1223,128 @@ func (s *Server) handleUpdateExchangeKeysOnly(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":          "API密钥已更新到数据库",
+		"affected_traders": len(affectedTraders),
+		"running_traders":  len(runningTraders),
+		"trader_ids":       affectedTraders,
+		"note":             "运行中的交易员将在下次重启时使用新密钥",
+	})
+}
+
+// handleUpdateAIModelKeysOnly 仅更新数据库中的AI模型API密钥（同时更新DeepSeek和Qwen）
+// 输入一个API密钥，自动更新两个模型的密钥
+func (s *Server) handleUpdateAIModelKeysOnly(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		APIKey string `json:"api_key" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数错误: " + err.Error()})
+		return
+	}
+
+	log.Printf("🔑 [AI密钥更新] 用户 %s 请求更新DeepSeek和Qwen的API密钥（仅数据库）", userID)
+
+	// 1. 获取现有AI模型配置
+	aiModels, err := s.database.GetAIModels(userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取AI模型配置失败"})
+		return
+	}
+
+	// 2. 查找DeepSeek和Qwen模型
+	var deepseekModel *config.AIModelConfig
+	var qwenModel *config.AIModelConfig
+
+	for _, model := range aiModels {
+		if model.Provider == "deepseek" {
+			deepseekModel = model
+		} else if model.Provider == "qwen" {
+			qwenModel = model
+		}
+	}
+
+	updatedModels := []string{}
+	affectedTraders := []string{}
+	runningTraders := []string{}
+
+	// 3. 更新DeepSeek模型
+	if deepseekModel != nil {
+		err = s.database.UpdateAIModel(
+			userID,
+			deepseekModel.ID,
+			deepseekModel.Enabled,
+			req.APIKey,
+			deepseekModel.CustomAPIURL,
+			deepseekModel.CustomModelName,
+		)
+		if err != nil {
+			log.Printf("❌ [AI密钥更新] 更新DeepSeek模型失败: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "更新DeepSeek模型密钥失败: " + err.Error()})
+			return
+		}
+		updatedModels = append(updatedModels, "deepseek")
+		log.Printf("✅ [AI密钥更新] DeepSeek模型密钥已更新")
+	} else {
+		log.Printf("⚠️  [AI密钥更新] 未找到DeepSeek模型配置")
+	}
+
+	// 4. 更新Qwen模型
+	if qwenModel != nil {
+		err = s.database.UpdateAIModel(
+			userID,
+			qwenModel.ID,
+			qwenModel.Enabled,
+			req.APIKey,
+			qwenModel.CustomAPIURL,
+			qwenModel.CustomModelName,
+		)
+		if err != nil {
+			log.Printf("❌ [AI密钥更新] 更新Qwen模型失败: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "更新Qwen模型密钥失败: " + err.Error()})
+			return
+		}
+		updatedModels = append(updatedModels, "qwen")
+		log.Printf("✅ [AI密钥更新] Qwen模型密钥已更新")
+	} else {
+		log.Printf("⚠️  [AI密钥更新] 未找到Qwen模型配置")
+	}
+
+	if len(updatedModels) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "未找到DeepSeek或Qwen模型配置"})
+		return
+	}
+
+	// 5. 获取使用这些模型的交易员信息
+	traders, err := s.database.GetTraders(userID)
+	if err != nil {
+		log.Printf("⚠️  [AI密钥更新] 获取交易员列表失败: %v", err)
+	} else {
+		for _, trader := range traders {
+			// 检查交易员使用的模型是否是deepseek或qwen
+			if deepseekModel != nil && trader.AIModelID == deepseekModel.ID {
+				affectedTraders = append(affectedTraders, trader.ID)
+				if trader.IsRunning {
+					runningTraders = append(runningTraders, trader.ID)
+				}
+			}
+			if qwenModel != nil && trader.AIModelID == qwenModel.ID {
+				affectedTraders = append(affectedTraders, trader.ID)
+				if trader.IsRunning {
+					runningTraders = append(runningTraders, trader.ID)
+				}
+			}
+		}
+	}
+
+	log.Printf("📊 [AI密钥更新] 已更新 %d 个模型（%v），影响 %d 个交易员，其中 %d 个正在运行",
+		len(updatedModels), updatedModels, len(affectedTraders), len(runningTraders))
+	log.Printf("ℹ️  [AI密钥更新] 运行中的交易员将继续使用旧密钥，直到下次重启")
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":          "AI模型API密钥已更新到数据库",
+		"updated_models":   updatedModels,
 		"affected_traders": len(affectedTraders),
 		"running_traders":  len(runningTraders),
 		"trader_ids":       affectedTraders,

@@ -328,6 +328,13 @@ export const translations = {
     // AI Traders Page - Additional
     inUse: 'In Use',
     noModelsConfigured: 'No configured AI models',
+    apiPerformance: 'API Performance Overview',
+    apiPerformanceSubtitle:
+      'Track running AI APIs and their live P&L to choose the best model',
+    runningApis: 'Running APIs',
+    lossFocus: 'Loss focus',
+    noActiveApis: 'No AI APIs are running yet',
+    noLossForModel: 'No losses for this model yet',
     noExchangesConfigured: 'No configured exchanges',
     signalSource: 'Signal Source',
     signalSourceConfig: 'Signal Source Configuration',
@@ -1164,6 +1171,13 @@ export const translations = {
     // AI Traders Page - Additional
     inUse: '正在使用',
     noModelsConfigured: '暂无已配置的AI模型',
+    apiPerformance: 'API 运行表现',
+    apiPerformanceSubtitle:
+      '实时查看正在运行的 AI API 及其亏损情况，辅助选择模型',
+    runningApis: '运行中的 API',
+    lossFocus: '亏损焦点',
+    noActiveApis: '暂无正在运行的 AI API',
+    noLossForModel: '该模型暂未出现亏损',
     noExchangesConfigured: '暂无已配置的交易所',
     signalSource: '信号源',
     signalSourceConfig: '信号源配置',
